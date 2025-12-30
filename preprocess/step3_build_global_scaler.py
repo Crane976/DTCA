@@ -4,7 +4,7 @@ import numpy as np
 import os
 import joblib
 import sys
-from sklearn.preprocessing import MinMaxScaler
+from config import DEFENDER_SET, LogMinMaxScaler # 导入新类
 
 # ==========================================================
 # --- 路径修正与模块导入 ---
@@ -61,7 +61,7 @@ def main():
 
     # --- 2. 训练全局Scaler ---
     print("\n正在训练全局Scaler...")
-    scaler = MinMaxScaler()
+    scaler = LogMinMaxScaler() # <-- 换成这行
 
     # 核心操作: 在训练集的DEFENDER_SET上 .fit()
     scaler.fit(df_features)

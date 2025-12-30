@@ -1,4 +1,4 @@
-# models/train_mlp_hunter.py (UPGRADED WITH FOCAL LOSS & THRESHOLD OPTIMIZATION)
+# models/train_mlp_hunter.py (FINAL FIXED VERSION With Data Cleaning)
 import pandas as pd
 import numpy as np
 import os
@@ -6,25 +6,19 @@ import sys
 import joblib
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-# ✅ 1. 导入f1_score用于寻找最佳阈值
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from sklearn.metrics import classification_report, f1_score
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-# ==========================================================
-# --- Path Setup & Imports ---
-# ==========================================================
+# Path Setup
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.append(project_root)
+if project_root not in sys.path: sys.path.append(project_root)
 
 from config import DEFENDER_SET, set_seed
 from models.mlp_architecture import MLP_Classifier, FocalLoss
 
-# ==========================================================
-# --- 1. Configuration (与之前相同) ---
-# ==========================================================
+# Configuration
 TRAIN_SET_PATH = os.path.join(project_root, 'data', 'splits', 'training_set.csv')
 TEST_SET_PATH = os.path.join(project_root, 'data', 'splits', 'holdout_test_set.csv')
 SCALER_PATH = os.path.join(project_root, 'models', 'global_scaler.pkl')
@@ -39,63 +33,96 @@ RANDOM_SEED = 2025
 BEST_PARAMS = {'learning_rate': 0.0005}
 
 
-# ==========================================================
-# --- 2. Main Training Function ---
-# ==========================================================
+def clean_data(df, feature_cols):
+    """统一的数据清洗函数: 替换Inf并丢弃NaN"""
+    # 1. 替换 Inf
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # 2. 丢弃包含NaN的行 (仅检查特征列)
+    df.dropna(subset=feature_cols, inplace=True)
+    return df
+
+
 def main():
     set_seed(RANDOM_SEED)
     print("=" * 60)
-    print("🚀 开始训练 ResNet-MLP Hunter (最终版: Focal Loss + 阈值优化)...")
+    print("🚀 开始训练 ResNet-MLP Hunter (修复版: 含数据清洗)...")
     print("=" * 60)
-    # ... (数据加载和准备部分与上一版完全相同) ...
+
+    # --- 1. 加载数据 ---
     df_train_full = pd.read_csv(TRAIN_SET_PATH)
     df_test = pd.read_csv(TEST_SET_PATH)
     scaler = joblib.load(SCALER_PATH)
     feature_names = scaler.feature_names_in_
+
+    # --- ✅ 关键修复: 数据清洗 ---
+    print("正在清洗数据 (去除 Inf/NaN)...")
+    len_train_before = len(df_train_full)
+    df_train_full = clean_data(df_train_full, feature_names)
+    print(f"   -> 训练集清洗掉 {len_train_before - len(df_train_full)} 条脏数据")
+
+    len_test_before = len(df_test)
+    df_test = clean_data(df_test, feature_names)
+    print(f"   -> 测试集清洗掉 {len_test_before - len(df_test)} 条脏数据")
+
+    # --- 2. 转换与划分 ---
     X_test_scaled = scaler.transform(df_test[feature_names].values)
     y_test = df_test['label'].values
+
     X_train_full_scaled = scaler.transform(df_train_full[feature_names].values)
     y_train_full = df_train_full['label'].values
+
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_full_scaled, y_train_full, test_size=VALIDATION_SPLIT, random_state=RANDOM_SEED, stratify=y_train_full
     )
+
+    # --- 3. 加权采样器 ---
+    class_sample_count = np.array([len(np.where(y_train == t)[0]) for t in np.unique(y_train)])
+    weight = 1. / class_sample_count
+    samples_weight = np.array([weight[t] for t in y_train.astype(int)])
+    samples_weight = torch.from_numpy(samples_weight)
+    sampler = WeightedRandomSampler(samples_weight.type('torch.DoubleTensor'), len(samples_weight))
+
     train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                   torch.tensor(y_train, dtype=torch.float32).unsqueeze(1))
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, shuffle=False)
+
     val_tensor_x = torch.tensor(X_val, dtype=torch.float32).to(device)
     val_tensor_y = torch.tensor(y_val, dtype=torch.float32).unsqueeze(1).to(device)
 
-    # ... (模型初始化、损失函数、优化器部分与上一版完全相同) ...
+    # --- 4. 训练 ---
     benign_ratio = (y_train_full == 0).sum() / len(y_train_full)
     model = MLP_Classifier(feature_dim=FEATURE_DIM).to(device)
-    criterion = FocalLoss(alpha=benign_ratio, gamma=2.0)
+    criterion = FocalLoss(alpha=0.5, gamma=2.0)  # alpha调为0.5因为用了Balanced Sampler
     optimizer = torch.optim.AdamW(model.parameters(), lr=BEST_PARAMS['learning_rate'])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5,
-                                                           verbose=False)  # 关闭verbose
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
 
     print("\n[步骤1] 正在训练模型...")
     best_val_loss = float('inf')
-    # ... (训练循环部分与上一版完全相同) ...
+
     for epoch in range(EPOCHS):
         model.train()
-        for x_batch, y_batch in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}", leave=False)
+        for x_batch, y_batch in pbar:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             loss = criterion(model(x_batch), y_batch)
-            optimizer.zero_grad();
-            loss.backward();
+            optimizer.zero_grad()
+            loss.backward()
             optimizer.step()
+            pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
         model.eval()
         with torch.no_grad():
             val_loss = criterion(model(val_tensor_x), val_tensor_y).item()
         scheduler.step(val_loss)
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), MLP_HUNTER_MODEL_PATH)
 
     print(f"\n✅ 训练完成，最佳验证损失: {best_val_loss:.6f}")
 
-    # --- ✅ 2. 核心改进: 在验证集上寻找最佳决策阈值 ---
-    print("\n[步骤2] 正在验证集上寻找最佳决策阈值...")
+    # --- 5. 阈值与评估 ---
+    print("\n[步骤2] 寻找最佳决策阈值...")
     final_model = MLP_Classifier(feature_dim=FEATURE_DIM).to(device)
     final_model.load_state_dict(torch.load(MLP_HUNTER_MODEL_PATH, map_location=device))
     final_model.eval()
@@ -105,23 +132,18 @@ def main():
 
     best_threshold = 0.5
     best_f1 = 0
-    # 在0.01到0.99之间，以0.01为步长，遍历所有可能的阈值
     for threshold in np.arange(0.01, 1.0, 0.01):
         y_val_pred = (val_probs > threshold).astype(int)
-        # 我们关心的是Bot类别(label=1)的F1分数
         current_f1 = f1_score(y_val, y_val_pred, pos_label=1)
         if current_f1 > best_f1:
             best_f1 = current_f1
             best_threshold = threshold
 
-    print(f"✅ 最佳阈值查找完毕: {best_threshold:.2f} (在该阈值下验证集F1分数为: {best_f1:.4f})")
+    print(f"✅ 最佳阈值: {best_threshold:.2f} (F1: {best_f1:.4f})")
 
-    # --- 3. 使用最佳阈值在测试集上进行最终评估 ---
-    print("\n--- 最终'ResNet-MLP Hunter'在【留出测试集】上的真实性能报告 ---")
     with torch.no_grad():
         test_tensor_x = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
         test_probs = final_model.predict(test_tensor_x).cpu().numpy()
-        # ✅ 使用找到的最佳阈值进行预测
         y_pred = (test_probs > best_threshold).astype(int)
 
     print(classification_report(y_test, y_pred, target_names=['Benign (0)', 'Bot (1)'], digits=4))

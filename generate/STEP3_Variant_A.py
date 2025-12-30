@@ -1,17 +1,13 @@
-# generate/STEP3_generate_decoy_clustered_watermarked.py
-# (FINAL VERSION: CLUSTERED FOCUS + HARD CONSTRAINTS + WATERMARK TRACEABILITY)
-
+# generate/STEP3_Variant_A_no_cluster.py
 import pandas as pd
 import numpy as np
 import os
 import sys
 import joblib
 import torch
-from sklearn.cluster import KMeans  # ✅ 新增 KMeans 导入
 
-# ==========================================================
-# --- 路径修正与模块导入 ---
-# ==========================================================
+# form sklearn.cluster import KMeans # ❌ 移除 KMeans
+
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path: sys.path.append(project_root)
 
@@ -20,16 +16,15 @@ from models.lstm_finetuner import LSTMFinetuner
 from models.lstm_predictor import LSTMPredictor
 from config import DEFENDER_SET, ATTACKER_KNOWLEDGE_SET, ATTACKER_ACTION_SET, COMPLEX_SET, set_seed
 
-# ==========================================================
-# --- 配置区 ---
-# ==========================================================
+# --- 配置 ---
 CLEAN_DATA_PATH = os.path.join(project_root, 'data', 'splits', 'training_set.csv')
 SCALER_PATH = os.path.join(project_root, 'models', 'global_scaler.pkl')
 CAE_MODEL_PATH = os.path.join(project_root, 'models', 'style_transfer_cae.pt')
 LSTM_FINETUNER_MODEL_PATH = os.path.join(project_root, 'models', 'lstm_finetuner.pt')
 PREDICTOR_MODEL_PATH = os.path.join(project_root, 'models', 'lstm_reconciliation_predictor.pt')
 
-OUTPUT_CSV_PATH = os.path.join(project_root, 'data', 'generated', 'final_camouflage_bot_hard_constrained.csv')
+# 输出文件改为 Variant A
+OUTPUT_CSV_PATH = os.path.join(project_root, 'data', 'generated', 'variant_A_no_cluster.csv')
 
 FEATURE_DIM_CAE = len(ATTACKER_KNOWLEDGE_SET)
 LATENT_DIM_CAE = 5
@@ -39,188 +34,102 @@ OUTPUT_DIM_LSTM_FINETUNER = len(ATTACKER_ACTION_SET)
 INPUT_DIM_PREDICTOR = len(ATTACKER_ACTION_SET)
 OUTPUT_DIM_PREDICTOR = len(COMPLEX_SET)
 
-# --- 生成参数 ---
 NUM_TO_GENERATE = 40000
-
-# 🔥 核心升级: 模仿强度 (0.98)
-# 配合聚类中心使用，极度逼近 Bot 特征，放弃部分随机性以换取高欺骗率
-MIMIC_INTENSITY = 0.98
-
-# 🔥 核心升级: Bot 聚类簇数
-# 只提取最典型的 5 种 Bot 模式进行模仿，消除边缘噪声
-NUM_BOT_CLUSTERS = 5
-
-# --- 水印参数 (溯源核心) ---
+MIMIC_INTENSITY = 0.98  # 保持强度一致，只改变导师选择策略
 WATERMARK_KEY = 97
 WATERMARK_FEATURE = 'Flow Duration'
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# ==========================================================
-# --- 水印注入函数 ---
-# ==========================================================
 def inject_watermark(df, key, feature_name):
-    """
-    在指定特征中注入模运算水印 (LSB Steganography)
-    逻辑: 修改数值，使其 % key == 0
-    """
-    print(f"\n🌊 [步骤7] 正在注入溯源水印 (Key={key}, Feature={feature_name})...")
-
-    # 复制一份以免影响原数据指针
+    # (保持原有的水印函数不变，为了控制变量，消融实验通常只改变一个因素)
+    # ... (代码省略，与最终版一致) ...
     df_w = df.copy()
-
-    # 获取原始值并转为整数 (微秒级时间戳本身就是整数)
     values = df_w[feature_name].values.astype(int)
-
-    # 计算余数 (Residuals)
     residuals = values % key
-
-    # 修改值: 减去余数，使其能被 key 整除
     new_values = values - residuals
-
-    # 修正边界情况: Duration 不能为 0 或负数
-    # 如果减去余数后 <= 0，则加一个 Key，保证它是正数且依然能被 Key 整除
     mask_too_small = (new_values <= 0)
     new_values[mask_too_small] += key
-
     df_w[feature_name] = new_values
 
-    # 验证注入率
-    success_rate = np.mean(df_w[feature_name] % key == 0)
-    print(f"   -> 水印注入完成。理论验证通过率: {success_rate * 100:.2f}%")
-
-    # ⚠️ 关键步骤: 重新计算速率特征以保持硬约束自洽
-    # 因为 Flow Duration 变了，Bytes/s 和 Pkts/s 必须同步变
-    print("   -> 正在同步更新关联特征 (Bytes/s, Pkts/s) 以维持数学自洽...")
-
-    duration_sec = df_w['Flow Duration'] / 1e6  # 微秒转秒
-
+    duration_sec = df_w['Flow Duration'] / 1e6
     if 'Total Length of Fwd Packets' in df_w.columns:
         total_bytes = df_w['Total Length of Fwd Packets'] + df_w['Total Length of Bwd Packets']
         df_w['Flow Bytes/s'] = total_bytes / (duration_sec + 1e-9)
-
     if 'Total Fwd Packets' in df_w.columns:
         total_pkts = df_w['Total Fwd Packets'] + df_w['Total Backward Packets']
         df_w['Flow Packets/s'] = total_pkts / (duration_sec + 1e-9)
-
     return df_w
 
 
-# ==========================================================
-# --- 主函数 ---
-# ==========================================================
 def main():
     set_seed(2025)
     print("=" * 60)
-    print("🚀 (Decoy + ClusterFocus + Traceability) STEP 3: 生成...")
+    print("🚀 [消融实验 Variant A] 无聚类聚焦 (Random Tutor)...")
     print("=" * 60)
-    print(f"   模仿强度: {MIMIC_INTENSITY}")
-    print(f"   Bot聚类数: {NUM_BOT_CLUSTERS}")
-    print(f"   溯源密钥: {WATERMARK_KEY}")
 
-    # --- 1. 加载模型及数据 ---
-    print("\n[步骤1] 加载模型及清洗后的数据...")
+    # 1. 加载模型 (不变)
     scaler = joblib.load(SCALER_PATH)
-
     predictor = LSTMPredictor(INPUT_DIM_PREDICTOR, OUTPUT_DIM_PREDICTOR).to(device)
     predictor.load_state_dict(torch.load(PREDICTOR_MODEL_PATH, map_location=device))
     predictor.eval()
-
     cae_model = ConditionalAutoencoder(FEATURE_DIM_CAE, LATENT_DIM_CAE, NUM_CLASSES_CAE).to(device)
     cae_model.load_state_dict(torch.load(CAE_MODEL_PATH, map_location=device))
     cae_model.eval()
-
     lstm_finetuner = LSTMFinetuner(INPUT_DIM_LSTM_FINETUNER, OUTPUT_DIM_LSTM_FINETUNER).to(device)
     lstm_finetuner.load_state_dict(torch.load(LSTM_FINETUNER_MODEL_PATH, map_location=device))
     lstm_finetuner.eval()
 
     df_clean_full = pd.read_csv(CLEAN_DATA_PATH)
-
-    # 1.1 准备 Benign 母体
     df_benign_source = df_clean_full[df_clean_full['label'] == 0].sample(n=NUM_TO_GENERATE, replace=True,
                                                                          random_state=2025)
-
-    # 1.2 准备 Bot 全量数据 (用于聚类)
     df_bot_all = df_clean_full[df_clean_full['label'] == 1]
 
-    print(f"✅ 准备完毕: {len(df_benign_source)} Benign 母体, {len(df_bot_all)} 真实 Bot 样本(用于聚类)。")
+    # --- ❌ 移除聚类步骤 ---
+    print("\n[步骤1.5] 跳过聚类 (Ablation: No Clustering)...")
+    print("   -> 直接从真实 Bot 样本中随机抽取导师。")
 
-    # --- 1.5 Bot 风格聚类 (寻找最强特征) ---
-    print(f"\n[步骤1.5] 对真实 Bot 进行聚类 (K={NUM_BOT_CLUSTERS}) 以提取纯粹风格...")
+    # 直接随机抽取作为导师，不经过 KMeans 提纯
+    df_bot_tutors = df_bot_all.sample(n=NUM_TO_GENERATE, replace=True, random_state=2025).reset_index(drop=True)
 
-    # 缩放所有 Bot 数据
-    bot_scaled_full = scaler.transform(df_bot_all[DEFENDER_SET])
-
-    # 执行 KMeans
-    kmeans = KMeans(n_clusters=NUM_BOT_CLUSTERS, random_state=2025, n_init=10)
-    kmeans.fit(bot_scaled_full)
-
-    # 获取聚类中心 (Scaled状态)
-    centers_scaled = kmeans.cluster_centers_
-
-    # 将中心逆向缩放回原始空间，构建 DataFrame
-    # 这样做是为了与后续的处理流程保持数据格式的一致性 (df_bot_tutors 应该是 DataFrame)
-    centers_unscaled = scaler.inverse_transform(centers_scaled)
-    df_bot_centers = pd.DataFrame(centers_unscaled, columns=DEFENDER_SET)
-
-    print(f"   -> 成功提取 {NUM_BOT_CLUSTERS} 个 Bot 风格中心。")
-
-    # 随机分配导师：让 40,000 个母体随机选择这 5 个中心之一进行模仿
-    tutor_indices = np.random.randint(0, NUM_BOT_CLUSTERS, size=NUM_TO_GENERATE)
-    df_bot_tutors = df_bot_centers.iloc[tutor_indices].reset_index(drop=True)
-
-    print(f"   -> 导师分配完毕: 所有生成样本将强制模仿这 {NUM_BOT_CLUSTERS} 个中心。")
-
-    # --- 2. 强力风格植入 (TIER 1) ---
+    # --- 2. 风格植入 (不变) ---
     print("\n[步骤2] TIER 1: 执行点对点风格植入...")
     with torch.no_grad():
-        # 2.1 Benign Z (Source)
         source_scaled = scaler.transform(df_benign_source[DEFENDER_SET])
         df_source_scaled = pd.DataFrame(source_scaled, columns=DEFENDER_SET)
         X_benign = torch.tensor(df_source_scaled[ATTACKER_KNOWLEDGE_SET].values, dtype=torch.float32).to(device)
         c_benign = torch.tensor([1.0, 0.0], dtype=torch.float32).expand(len(X_benign), -1).to(device)
         z_benign = cae_model.encode(X_benign, c_benign)
 
-        # 2.2 Bot Z (Centers as Tutors)
-        # 注意：这里 transform 实际上是多余的，因为 centers 刚被 inverse 过
-        # 但为了逻辑统一和防止精度问题，我们还是走一遍标准流程
         tutors_scaled = scaler.transform(df_bot_tutors[DEFENDER_SET])
         df_tutors_scaled = pd.DataFrame(tutors_scaled, columns=DEFENDER_SET)
         X_bot = torch.tensor(df_tutors_scaled[ATTACKER_KNOWLEDGE_SET].values, dtype=torch.float32).to(device)
         c_bot_input = torch.tensor([0.0, 1.0], dtype=torch.float32).expand(len(X_bot), -1).to(device)
         z_bot = cae_model.encode(X_bot, c_bot_input)
 
-        # 2.3 混合 (MIMIC_INTENSITY = 0.98)
-        # 极度偏向 Bot，Benign 只提供极微小的扰动
         z_hybrid = (1 - MIMIC_INTENSITY) * z_benign + MIMIC_INTENSITY * z_bot
-
-        # 2.4 解码
         c_bot_target = torch.tensor([0.0, 1.0], dtype=torch.float32).expand(len(z_hybrid), -1).to(device)
         generated_knowledge_features_scaled = cae_model.decode(z_hybrid, c_bot_target)
 
-    # --- 3. LSTM 精调 (TIER 2) ---
+    # --- 3. LSTM (不变) ---
     print("\n[步骤3] TIER 2: LSTM 战术微调...")
     with torch.no_grad():
         input_for_lstm = generated_knowledge_features_scaled.unsqueeze(1)
         refined_action = lstm_finetuner(input_for_lstm)
-
         df_knowledge_scaled = pd.DataFrame(generated_knowledge_features_scaled.cpu().numpy(),
                                            columns=ATTACKER_KNOWLEDGE_SET)
         original_action = torch.tensor(df_knowledge_scaled[ATTACKER_ACTION_SET].values, dtype=torch.float32).to(device)
-
-        # 融合: LSTM 的权重保持 0.7
         fused_action = 0.3 * original_action + 0.7 * refined_action
         fused_action = np.clip(fused_action.cpu().numpy(), 0, 1)
 
-    # --- 4. 衍生特征预测 (TIER 3) ---
+    # --- 4. 预测 (不变) ---
     print("\n[步骤4] TIER 3: 衍生特征预测...")
     with torch.no_grad():
         input_predictor = torch.tensor(fused_action, dtype=torch.float32).unsqueeze(1).to(device)
         predicted_complex = predictor(input_predictor).cpu().numpy()
         predicted_complex = np.clip(predicted_complex, 0, 1)
 
-    # --- 5. 逆向缩放 ---
+    # --- 5. 逆向缩放 (不变) ---
     print("\n[步骤5] 逆向缩放...")
     df_temp_action = pd.DataFrame(0, index=range(NUM_TO_GENERATE), columns=DEFENDER_SET)
     df_temp_action[ATTACKER_ACTION_SET] = fused_action
@@ -232,27 +141,21 @@ def main():
 
     df_final = pd.concat([action_unscaled, complex_unscaled], axis=1)
 
-    # --- 6. 硬约束校准 ---
-    print("\n[步骤6] 应用硬约束 (初次校准)...")
-    # 基础计算
+    # --- 6. 硬约束 (保留) ---
+    print("\n[步骤6] 应用硬约束 (Ablation: Yes)...")
     df_final['Total Fwd Packets'] = df_final['Total Fwd Packets'].clip(lower=1)
     df_final['Total Backward Packets'] = df_final['Total Backward Packets'].clip(lower=0)
     df_final['Average Packet Size'] = df_final['Average Packet Size'].clip(lower=0)
-
     df_final['Total Length of Fwd Packets'] = df_final['Total Fwd Packets'] * df_final['Average Packet Size']
     df_final['Total Length of Bwd Packets'] = df_final['Total Backward Packets'] * df_final['Average Packet Size']
-
     total_pkts = df_final['Total Fwd Packets'] + df_final['Total Backward Packets']
     total_len = df_final['Total Length of Fwd Packets'] + df_final['Total Length of Bwd Packets']
     df_final['Packet Length Mean'] = total_len / (total_pkts + 1e-9)
-
     df_final['Flow Duration'] = df_final['Flow Duration'].clip(lower=1)
     duration_sec = df_final['Flow Duration'] / 1e6
     df_final['Flow Bytes/s'] = total_len / (duration_sec + 1e-9)
     df_final['Flow Packets/s'] = total_pkts / (duration_sec + 1e-9)
     df_final['Down/Up Ratio'] = df_final['Total Backward Packets'] / (df_final['Total Fwd Packets'] + 1e-9)
-
-    # 极值修正
     cols_root = ['Fwd Packet Length', 'Bwd Packet Length', 'Flow IAT', 'Fwd IAT', 'Bwd IAT']
     for root in cols_root:
         if f'{root} Min' in df_final.columns and f'{root} Max' in df_final.columns:
@@ -261,19 +164,15 @@ def main():
             if f'{root} Mean' in df_final.columns:
                 df_final[f'{root} Mean'] = np.clip(df_final[f'{root} Mean'], df_final[f'{root} Min'],
                                                    df_final[f'{root} Max'])
-
-    # 补全列
     for col in DEFENDER_SET:
-        if col not in df_final.columns:
-            df_final[col] = 0
+        if col not in df_final.columns: df_final[col] = 0
     df_final = df_final[DEFENDER_SET]
 
-    # --- 7. 注入溯源水印 (关键步骤) ---
+    # --- 7. 水印 (保留) ---
     df_final_watermarked = inject_watermark(df_final, WATERMARK_KEY, WATERMARK_FEATURE)
 
-    # --- 保存 ---
     df_final_watermarked.to_csv(OUTPUT_CSV_PATH, index=False)
-    print(f"\n✅ {len(df_final_watermarked)} 条'聚类聚焦+可溯源'诱饵流量已保存到: {OUTPUT_CSV_PATH}")
+    print(f"\n✅ Variant A 生成完毕: {OUTPUT_CSV_PATH}")
 
 
 if __name__ == "__main__":

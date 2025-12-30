@@ -22,7 +22,7 @@ RANDOM_STATE = 42
 # --- 2. 加载数据 ---
 print("🚀 [步骤1] 正在加载数据...")
 try:
-    camouflage_bot_df = pd.read_csv(os.path.join(project_root, 'data', 'generated', 'final_camouflage_bot_3tier_lstm.csv'))
+    camouflage_bot_df = pd.read_csv(os.path.join(project_root, 'data', 'generated', 'variant_A_no_cluster.csv'))
     benign_df = pd.read_csv(os.path.join(project_root, 'data', 'filtered', 'benign_traffic.csv'))
     real_bot_df = pd.read_csv(os.path.join(project_root, 'data', 'filtered', 'bot_traffic_target.csv'))
     print(f"  - 伪装Bot: {len(camouflage_bot_df)} 条")
@@ -119,12 +119,12 @@ sns.scatterplot(
     ax=ax
 )
 
-ax.set_title(f'Feature Space Distribution (t-SNE, Perplexity={TSNE_PERPLEXITY})', fontsize=16)
+ax.set_title(f'Feature Space Distribution(No_Cluster) (t-SNE, Perplexity={TSNE_PERPLEXITY})', fontsize=16)
 ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
 ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
 ax.legend(title='Data Type', markerscale=2)
 
-output_path = os.path.join(project_root, 'figures', 'tsne_distribution_analysis.png')
+output_path = os.path.join(project_root, 'figures', 'tsne_distribution_analysis_variant_A.png')
 plt.savefig(output_path, dpi=300)
 
 print(f"\n✅ 可视化图表已保存到: {output_path}")
